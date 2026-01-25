@@ -1,142 +1,122 @@
-from imutils.video import VideoStream
-from imutils import face_utils
-import numpy as np
-import imutils
-import time
-from threading import Thread
-import dlib
-import os
 import cv2
-import pygame  # dùng pygame để phát âm thanh
+import mediapipe as mp
+import numpy as np
+import time
+import pygame
+from threading import Thread
+import os
 
-# Đường dẫn đến file âm thanh
+# ================== ÂM THANH ==================
 wav_path = "alarm.wav"
 
-# Hàm phát ra âm thanh
-def play_sound(path):
-    base_path = os.path.dirname(os.path.abspath(__file__))  # thư mục chứa file .py
-    sound_path = os.path.join(base_path, path)
-
+def play_sound():
+    base = os.path.dirname(os.path.abspath(__file__))
+    sound = os.path.join(base, wav_path)
     pygame.mixer.init()
-    pygame.mixer.music.load(sound_path)
+    pygame.mixer.music.load(sound)
     pygame.mixer.music.play()
     while pygame.mixer.music.get_busy():
-        continue
+        time.sleep(0.1)
 
-# Hàm tính khoảng cách giữa 2 điểm
-def e_dist(pA, pB):
-    return np.linalg.norm(pA - pB)
+# ================== HÀM TÍNH ==================
+def dist(a, b):
+    return np.linalg.norm(a - b)
 
-# Tính tỷ lệ mắt
 def eye_ratio(eye):
-    d_V1 = e_dist(eye[1], eye[5])
-    d_V2 = e_dist(eye[2], eye[4])
-    d_H = e_dist(eye[0], eye[3])
-    return (d_V1 + d_V2) / (2.0 * d_H)
+    return (dist(eye[1], eye[5]) + dist(eye[2], eye[4])) / (2.0 * dist(eye[0], eye[3]))
 
-# Tính tỷ lệ ngáp (miệng)
-def mouth_ratio(mouth):
-    d_V = e_dist(mouth[2], mouth[10])  # Khoảng cách dọc (giữa môi trên và môi dưới)
-    d_H = e_dist(mouth[0], mouth[6])   # Khoảng cách ngang (giữa hai mép miệng)
-    return d_V / d_H
+def mouth_ratio(m):
+    return dist(m[2], m[10]) / dist(m[0], m[6])
 
-# Ngưỡng tỷ lệ mắt để xác định buồn ngủ
-eye_ratio_threshold = 0.2
-# Ngưỡng tỷ lệ miệng để xác định ngáp
-yawn_ratio_threshold = 0.8
+# ================== NGƯỠNG CỐ ĐỊNH ==================
+EYE_THR      = 0.23     # ngưỡng nhắm mắt
+MAX_SLEEP    = 25       # số frame nhắm mắt liên tục
 
-# Threshold số frame liên tục nhắm mắt/ngáp
-max_sleep_frames = 45
+YAWN_THR     = 0.23     # ngưỡng ngáp
+YAWN_FRAMES  = 10       # số frame ngáp liên tục
+
+# ================== BIẾN ĐẾM ==================
 sleep_frames = 0
-
-# Check xem đã cảnh báo hay chưa
+yawn_frames  = 0
 alarmed = False
 
-# Khởi tạo các module detect mặt và facial landmark
-face_detect = cv2.CascadeClassifier(r"D:\haarcascade_frontalface_default.xml")
-landmark_detect = dlib.shape_predictor(r"D:\shape_predictor_68_face_landmarks.dat")
+# ================== MEDIAPIPE ==================
+mp_face = mp.solutions.face_mesh
+face_mesh = mp_face.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
-# Lấy danh sách các cụm điểm landmark cho 2 mắt và miệng
-(left_eye_start, left_eye_end) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
-(right_eye_start, right_eye_end) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
-(mouth_start, mouth_end) = face_utils.FACIAL_LANDMARKS_IDXS["mouth"]
+LEFT_EYE  = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+MOUTH     = [78, 81, 13, 311, 308, 402, 14, 178, 87, 317, 82, 312]
 
-# Đọc từ camera
-vs = VideoStream(src=0).start()
-time.sleep(1.0)
+# ================== CAMERA ==================
+cap = cv2.VideoCapture(0)
+time.sleep(1)
 
+cv2.namedWindow("Camera", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Camera", 800, 600)
+
+# ================== MAIN LOOP ==================
 while True:
-    # Đọc từ camera
-    frame = vs.read()
-    frame = imutils.resize(frame, width=450)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ret, frame = cap.read()
+    if not ret:
+        continue
 
-    # Detect các mặt trong ảnh
-    faces = face_detect.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, 
-        minSize=(100, 100), flags=cv2.CASCADE_SCALE_IMAGE
-    )
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = face_mesh.process(rgb)
 
-    # Duyệt qua các mặt
-    for (x, y, w, h) in faces:
-        rect = dlib.rectangle(int(x), int(y), int(x + w), int(y + h))
+    if result.multi_face_landmarks:
+        h, w, _ = frame.shape
+        lm = result.multi_face_landmarks[0].landmark
 
-        # Nhận diện các điểm landmark
-        landmark = landmark_detect(gray, rect)
-        landmark = face_utils.shape_to_np(landmark)
+        leftEye  = np.array([[lm[i].x * w, lm[i].y * h] for i in LEFT_EYE])
+        rightEye = np.array([[lm[i].x * w, lm[i].y * h] for i in RIGHT_EYE])
+        mouth    = np.array([[lm[i].x * w, lm[i].y * h] for i in MOUTH])
 
-        # Tính toán tỷ lệ mắt trái, mắt phải, và trung bình
-        leftEye = landmark[left_eye_start:left_eye_end]
-        rightEye = landmark[right_eye_start:right_eye_end]
-        left_eye_ratio = eye_ratio(leftEye)
-        right_eye_ratio = eye_ratio(rightEye)
-        eye_avg_ratio = (left_eye_ratio + right_eye_ratio) / 2.0
+        ear = (eye_ratio(leftEye) + eye_ratio(rightEye)) / 2.0
+        mar = mouth_ratio(mouth)
 
-        # Tính toán tỷ lệ miệng để phát hiện ngáp
-        mouth = landmark[mouth_start:mouth_end]
-        mouth_ratio_val = mouth_ratio(mouth)
+        # ====== HIỂN THỊ GIÁ TRỊ ======
+        cv2.putText(frame, f"EYE: {ear:.3f}", (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.putText(frame, f"MOUTH: {mar:.3f}", (30, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
 
-        # Vẽ đường bao quanh mắt và miệng
-        left_eye_bound = cv2.convexHull(leftEye)
-        right_eye_bound = cv2.convexHull(rightEye)
-        mouth_bound = cv2.convexHull(mouth)
+        # ====== TRẠNG THÁI NGÁP (KHÔNG CẢNH BÁO) ======
+        if mar > YAWN_THR:
+            yawn_frames += 1
+            if yawn_frames >= YAWN_FRAMES:
+                cv2.putText(frame, "BAN DANG NGAP", (30, 140),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (0, 255, 255), 3)
+        else:
+            yawn_frames = 0
 
-        cv2.drawContours(frame, [left_eye_bound], -1, (0, 255, 0), 1)
-        cv2.drawContours(frame, [right_eye_bound], -1, (0, 255, 0), 1)
-        cv2.drawContours(frame, [mouth_bound], -1, (0, 255, 0), 1)
-
-        # Check xem mắt có nhắm không
-        if eye_avg_ratio < eye_ratio_threshold:
+        # ====== CẢNH BÁO BUỒN NGỦ (NHẮM MẮT) ======
+        if ear < EYE_THR:
             sleep_frames += 1
-            if sleep_frames >= max_sleep_frames:
+            if sleep_frames >= MAX_SLEEP:
                 if not alarmed:
                     alarmed = True
-                    t = Thread(target=play_sound, args=(wav_path,))
-                    t.daemon = True  # sửa chính tả
-                    t.start()
-                cv2.putText(frame, "CANH BAO BUON NGU!", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    Thread(target=play_sound, daemon=True).start()
+
+                cv2.putText(frame, "CANH BAO BUON NGU!", (30, 190),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (0, 0, 255), 3)
         else:
             sleep_frames = 0
             alarmed = False
-            cv2.putText(frame, "EYE AVG RATIO: {:.3f}".format(eye_avg_ratio),
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-        # Check xem có ngáp không
-        if mouth_ratio_val > yawn_ratio_threshold:
-            cv2.putText(frame, "CANH BAO NGAP!", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        else:
-            cv2.putText(frame, "MOUTH RATIO: {:.3f}".format(mouth_ratio_val),
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-
-    # Hiển thị lên màn hình
     cv2.imshow("Camera", frame)
-
-    # Bấm Esc để thoát
-    key = cv2.waitKey(1) & 0xFF
-    if key == 27:
+    if cv2.waitKey(1) & 0xFF == 27:
         break
 
+# ================== CLEAN ==================
+cap.release()
 cv2.destroyAllWindows()
-vs.stop()
+pygame.quit()
